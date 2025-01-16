@@ -1,0 +1,61 @@
+import os
+
+def populate_mitre_embeddings_table(file_path, source, max_length=512):
+    """
+    Populates the `application.mitre_embeddings` table using text from a CSV file by 
+    concatenating all columns and generating embeddings via the hosted API.
+
+    Args:
+        file_path (str): Path to the CSV file.
+        source (str): The source of the data (e.g., "mitre_technique").
+        max_length (int): Maximum number of tokens per chunk.
+    """
+    conn = get_postgres_connection()
+    cursor = conn.cursor()
+
+    try:
+        # Extract file name (without extension) to use as part of the control_id
+        filename = os.path.splitext(os.path.basename(file_path))[0]
+
+        # Read the CSV file
+        df = pd.read_csv(file_path)
+        print(f"Processing {len(df)} rows from {file_path}...")
+
+        # Iterate through each row in the dataframe
+        for idx, row in df.iterrows():
+            # Create a unique control_id using the file name and row index
+            control_id = f"{filename}_{idx}"
+
+            # Concatenate all columns into a single text field
+            document = " ".join(str(value) for value in row if pd.notnull(value))
+
+            # Split the document into manageable chunks
+            chunks = chunk_text(document, max_length=max_length)
+            for chunk_id, chunk in enumerate(chunks):
+                if not chunk.strip():
+                    print(f"Empty context for control_id {control_id}, skipping chunk_id {chunk_id}...")
+                    continue
+
+                # Call the API to get the embedding
+                embedding = get_query_embedding(chunk)
+
+                # Insert the embedding into the database
+                insert_query = """
+                    INSERT INTO application.mitre_embeddings (control_id, chunk_id, source, documents, embedding)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (control_id, chunk_id)
+                    DO UPDATE SET 
+                        source = EXCLUDED.source,
+                        documents = EXCLUDED.documents,
+                        embedding = EXCLUDED.embedding;
+                """
+                cursor.execute(insert_query, (control_id, chunk_id, source, chunk, embedding.tolist()))
+
+        conn.commit()
+        print(f"Embeddings from {file_path} successfully inserted into the database.")
+    except Exception as e:
+        print(f"Error while processing {file_path}: {e}")
+        conn.rollback()
+    finally:
+        cursor.close()
+        conn.close()
